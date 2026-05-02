@@ -5,7 +5,7 @@ return {
     config = function() require("telescope").load_extension "luasnip" end,
     -- Add a keybinding to open it
     keys = {
-      { "<leader>ss", "<cmd>Telescope luasnip<cr>", desc = "Find snippets" },
+      { "<leader>fS", "<cmd>Telescope luasnip<cr>", desc = "Find snippets" },
     },
   },
 }
