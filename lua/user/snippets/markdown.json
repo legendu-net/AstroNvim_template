@@ -1,0 +1,45 @@
+{
+  "Tip - Myst": {
+    "prefix": "tip",
+    "body": [
+      "```{tip}",
+      "${0:tip here}",
+      "```"
+    ],
+    "description": "Add a list-table in MyST markdown."
+  },
+  "Note - Myst": {
+    "prefix": "note",
+    "body": [
+      "```{note}",
+      "${0:note here}",
+      "```"
+    ],
+    "description": "Add a list-table in MyST markdown."
+  },
+  "List Table - Myst": {
+    "prefix": "lt",
+    "body": [
+      "```{list-table}",
+      "---",
+      "header-rows: 1",
+      "---",
+      "- - ${1:col1}",
+      "  - ${2:col2}",
+      "  - ${3:col3}",
+      "- - ${4:val1}",
+      "  - ${5:val2}",
+      "  - ${6:val3}",
+      "$0",
+      "```"
+    ],
+    "description": "Add a list-table in MyST markdown."
+  },
+  "Label - Myst": {
+    "prefix": "label",
+    "body": [
+      "(${0:my-label})="
+    ],
+    "description": "Add a label in MyST markdown for referencing."
+  }
+}
