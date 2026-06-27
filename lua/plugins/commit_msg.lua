@@ -18,9 +18,44 @@ local function llm_cmd()
   return nil
 end
 
+-- Build the `jj diff` command scoped to the change being described. A
+-- `*.jjdescription` buffer carries the change's id and file list in its `JJ:`
+-- comments; diffing just that change (rather than the whole working copy) keeps
+-- the summary focused when the description is for a non-`@` revision or only
+-- part of a change. Both `-r <id>` and `-- <files>` are needed: `jj split`
+-- opens this editor before persisting the split, so `-r <id>` alone still sees
+-- the un-split tree; restricting to the listed files yields the right subset.
+local function jj_diff_cmd(buf)
+  local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+  local change_id
+  local files = {}
+  for _, line in ipairs(lines) do
+    -- Only the first Change ID line is honored; a second one would otherwise
+    -- add a stray `-r`, turning the revset into an unintended union.
+    change_id = change_id or line:match "^JJ: Change ID:%s+(%S+)"
+    -- File lines look like `JJ:     M path/to/file`. Renames/copies embed the
+    -- change as `{old => new}`, optionally with a shared prefix/suffix
+    -- (`{dir => newdir}/file`); rewrite that segment to the destination path.
+    local file = line:match "^JJ:%s+[AMDRC]%s+(.+)$"
+    if file then
+      file = vim.trim((file:gsub("{.-%s*=>%s*(.-)}", "%1")))
+      -- Skip empties so we never pass a blank path to `jj diff`.
+      if file ~= "" then table.insert(files, file) end
+    end
+  end
+  local cmd = { "jj", "diff" }
+  if change_id then vim.list_extend(cmd, { "-r", change_id }) end
+  if #files > 0 then
+    table.insert(cmd, "--")
+    vim.list_extend(cmd, files)
+  end
+  return cmd
+end
+
 -- Build a `BufReadPost`/`BufNewFile` callback that, when the message is still
 -- empty, runs the diff and pipes it to the LLM asynchronously, then prepends
--- the result. `diff_cmd` is an argument list (e.g. `{ "git", "diff" }`).
+-- the result. `diff_cmd` is an argument list (e.g. `{ "git", "diff" }`) or a
+-- function `(buf) -> argument list` to compute one from the buffer contents.
 -- `comment_prefix` is the line prefix the VCS uses for comments (`JJ:`, `#`).
 local function make_prefill(diff_cmd, comment_prefix)
   return function(args)
@@ -46,8 +81,9 @@ local function make_prefill(diff_cmd, comment_prefix)
     -- Run the diff, then feed its output to the LLM on stdin. Each command runs
     -- directly (no shell), avoiding shell-quoting issues and the lack of `sh`
     -- on Windows.
+    local cmd = type(diff_cmd) == "function" and diff_cmd(buf) or diff_cmd
     vim.system(
-      diff_cmd,
+      cmd,
       { text = true },
       vim.schedule_wrap(function(diff_out)
         if diff_out.code ~= 0 then
@@ -94,7 +130,7 @@ return {
           event = { "BufReadPost", "BufNewFile" },
           pattern = "*.jjdescription",
           desc = "Prefill jj description with an AI-generated commit message",
-          callback = make_prefill({ "jj", "diff" }, "JJ:"),
+          callback = make_prefill(jj_diff_cmd, "JJ:"),
         },
         {
           event = { "BufReadPost", "BufNewFile" },
