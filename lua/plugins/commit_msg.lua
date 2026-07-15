@@ -2,14 +2,14 @@
 -- the top of a commit-message file when it is opened empty. Supports Jujutsu
 -- (`*.jjdescription`) and Git (`.git/COMMIT_EDITMSG`).
 
-local PROMPT = "Write a concise conventional commit message for this diff. " .. "Output ONLY the message."
+local PROMPT = "Write a concise conventional commit message for this diff. Output ONLY the message."
 
 -- Resolve the LLM command (as an argument list) that reads a diff on stdin and
 -- prints a commit message. Prefer `jetski`, then `agy`, then `claude`.
 -- Returns nil when none are available.
 local function llm_cmd()
   if vim.fn.executable "jetski" == 1 then
-    return { "jetski", "--model", "Gemini 3.5 Flash (Low)", "--print", PROMPT }
+    return { "jetski", "--model", "Gemini 3.5 Flash", "--print", PROMPT }
   elseif vim.fn.executable "agy" == 1 then
     return { "agy", "--model", "Gemini 3.5 Flash (Low)", "--print", PROMPT }
   elseif vim.fn.executable "claude" == 1 then
