@@ -4,18 +4,101 @@
 
 local PROMPT = "Write a concise conventional commit message for this diff. Output ONLY the message."
 
--- Resolve the LLM command (as an argument list) that reads a diff on stdin and
--- prints a commit message. Prefer `jetski`, then `agy`, then `claude`.
--- Returns nil when none are available.
-local function llm_cmd()
-  if vim.fn.executable "jetski" == 1 then
-    return { "jetski", "--model", "Gemini 3.5 Flash", "--print", PROMPT }
-  elseif vim.fn.executable "agy" == 1 then
-    return { "agy", "--model", "Gemini 3.5 Flash (Low)", "--print", PROMPT }
-  elseif vim.fn.executable "claude" == 1 then
-    return { "claude", "--model", "haiku", "-p", PROMPT }
+-- LLM tool specs, in order of preference. `build(model)` returns the argument
+-- list that reads a diff on stdin and prints a commit message; `list_models`,
+-- when set, is a command that prints the tool's available models (one per line)
+-- so a configured-but-deprecated model can be detected and replaced.
+local TOOLS = {
+  {
+    exe = "claude",
+    model = "haiku",
+    -- Aliases (haiku/sonnet/opus/fable) always resolve to the latest model and
+    -- are not deprecated, so there is nothing to validate against.
+    list_models = nil,
+    build = function(model) return { "claude", "--model", model, "-p", PROMPT } end,
+  },
+  {
+    exe = "jetski",
+    model = "Gemini 3.5 Flash",
+    list_models = { "jetski", "models" },
+    build = function(model) return { "jetski", "--model", model, "--print", PROMPT } end,
+  },
+  {
+    exe = "agy",
+    model = "Gemini 3.5 Flash (Low)",
+    list_models = { "agy", "models" },
+    build = function(model) return { "agy", "--model", model, "--print", PROMPT } end,
+  },
+}
+
+-- Resolve the first available tool spec, or nil when none are installed.
+local function llm_tool()
+  for _, tool in ipairs(TOOLS) do
+    if vim.fn.executable(tool.exe) == 1 then return tool end
   end
   return nil
+end
+
+-- Case-insensitive Levenshtein edit distance, used to pick the closest
+-- still-available model when the configured one has been deprecated.
+local function levenshtein(a, b)
+  a, b = a:lower(), b:lower()
+  local la, lb = #a, #b
+  if la == 0 then return lb end
+  if lb == 0 then return la end
+  local prev = {}
+  for j = 0, lb do
+    prev[j] = j
+  end
+  for i = 1, la do
+    local curr = { [0] = i }
+    for j = 1, lb do
+      local cost = a:byte(i) == b:byte(j) and 0 or 1
+      curr[j] = math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost)
+    end
+    prev = curr
+  end
+  return prev[lb]
+end
+
+-- Given the configured model and the list of available ones, return the model
+-- to use and whether a substitution was made. When the configured model is
+-- available (or the list is unknown) it is used unchanged; otherwise the
+-- closest name by edit distance is chosen.
+local function resolve_model(want, available)
+  if not available or #available == 0 then return want, false end
+  -- Match case-insensitively but return the tool's own spelling, so a listing
+  -- that only differs in case is used as-is rather than flagged as a swap.
+  local lower = want:lower()
+  for _, m in ipairs(available) do
+    if m:lower() == lower then return m, false end
+  end
+  local best, best_dist
+  for _, m in ipairs(available) do
+    local dist = levenshtein(want, m)
+    if not best_dist or dist < best_dist then best, best_dist = m, dist end
+  end
+  return best, true
+end
+
+-- Fetch `tool`'s available models asynchronously and invoke `cb(models_or_nil)`.
+-- Any failure (no list command, nonzero exit, empty output) yields nil, so the
+-- caller falls back to using the configured model as-is.
+local function list_models(tool, cb)
+  if not tool.list_models then return cb(nil) end
+  vim.system(
+    tool.list_models,
+    { text = true },
+    vim.schedule_wrap(function(out)
+      if out.code ~= 0 then return cb(nil) end
+      local models = {}
+      for line in (out.stdout or ""):gmatch "[^\n]+" do
+        local m = vim.trim(line)
+        if m ~= "" then table.insert(models, m) end
+      end
+      cb(#models > 0 and models or nil)
+    end)
+  )
 end
 
 -- Build the `jj diff` command scoped to the change being described. A
@@ -71,51 +154,72 @@ local function make_prefill(diff_cmd, comment_prefix)
     end
     if not message_empty() then return end
 
-    local llm = llm_cmd()
-    if not llm then
-      vim.notify("Commit message summary skipped: no jetski/agy/claude found", vim.log.levels.WARN)
+    local tool = llm_tool()
+    if not tool then
+      vim.notify("Commit message summary skipped: no claude/jetski/agy found", vim.log.levels.WARN)
       return
     end
     -- The LLM call takes a few seconds; let the user know it is in progress.
     vim.notify("Generating commit message…", vim.log.levels.INFO)
-    -- Run the diff, then feed its output to the LLM on stdin. Each command runs
-    -- directly (no shell), avoiding shell-quoting issues and the lack of `sh`
-    -- on Windows.
-    local cmd = type(diff_cmd) == "function" and diff_cmd(buf) or diff_cmd
-    vim.system(
-      cmd,
-      { text = true },
-      vim.schedule_wrap(function(diff_out)
-        if diff_out.code ~= 0 then
-          vim.notify("Commit message summary failed: " .. (diff_out.stderr or ""), vim.log.levels.ERROR)
-          return
-        end
-        local diff = diff_out.stdout or ""
-        -- Nothing to summarize; don't waste an LLM call on an empty diff.
-        if vim.trim(diff) == "" then
-          vim.notify("Commit message summary skipped: no diff to summarize", vim.log.levels.WARN)
-          return
-        end
-        vim.system(
-          llm,
-          { text = true, stdin = diff },
-          vim.schedule_wrap(function(out)
-            if out.code ~= 0 then
-              vim.notify("Commit message summary failed: " .. (out.stderr or ""), vim.log.levels.ERROR)
-              return
-            end
-            local msg = vim.trim(out.stdout or "")
-            if msg == "" then return end
-            -- Re-check: the user may have started typing during the async call.
-            if not vim.api.nvim_buf_is_valid(buf) or not message_empty() then return end
-            local lines = vim.split(msg, "\n")
-            -- Trailing empty line to separate the message from the VCS comments.
-            table.insert(lines, "")
-            vim.api.nvim_buf_set_lines(buf, 0, 0, false, lines)
-          end)
-        )
-      end)
-    )
+    -- Look up the tool's available models first, so a configured model that has
+    -- since been deprecated can be swapped for the closest one still offered.
+    list_models(tool, function(available)
+      local model, substituted = resolve_model(tool.model, available)
+      local llm = tool.build(model)
+      -- Run the diff, then feed its output to the LLM on stdin. Each command
+      -- runs directly (no shell), avoiding shell-quoting issues and the lack of
+      -- `sh` on Windows.
+      local cmd = type(diff_cmd) == "function" and diff_cmd(buf) or diff_cmd
+      vim.system(
+        cmd,
+        { text = true },
+        vim.schedule_wrap(function(diff_out)
+          if diff_out.code ~= 0 then
+            vim.notify("Commit message summary failed: " .. (diff_out.stderr or ""), vim.log.levels.ERROR)
+            return
+          end
+          local diff = diff_out.stdout or ""
+          -- Nothing to summarize; don't waste an LLM call on an empty diff.
+          if vim.trim(diff) == "" then
+            vim.notify("Commit message summary skipped: no diff to summarize", vim.log.levels.WARN)
+            return
+          end
+          vim.system(
+            llm,
+            { text = true, stdin = diff },
+            vim.schedule_wrap(function(out)
+              if out.code ~= 0 then
+                vim.notify("Commit message summary failed: " .. (out.stderr or ""), vim.log.levels.ERROR)
+                return
+              end
+              local msg = vim.trim(out.stdout or "")
+              if msg == "" then return end
+              -- Re-check: the user may have started typing during the async call.
+              if not vim.api.nvim_buf_is_valid(buf) or not message_empty() then return end
+              local lines = vim.split(msg, "\n")
+              -- Trailing empty line to separate the message from the VCS comments.
+              table.insert(lines, "")
+              -- Flag the substitution when the configured model was unavailable,
+              -- so the author knows the message came from a different model.
+              if substituted then
+                table.insert(
+                  lines,
+                  comment_prefix
+                    .. " Note: configured model '"
+                    .. tool.model
+                    .. "' is unavailable; used the closest available model instead."
+                )
+              end
+              -- Record which tool and model produced this draft so the author
+              -- knows its provenance and how much to scrutinize it. Grouped with
+              -- the VCS comments, so it is stripped from the final message.
+              table.insert(lines, comment_prefix .. " Commit message generated by " .. tool.exe .. " (" .. model .. ")")
+              vim.api.nvim_buf_set_lines(buf, 0, 0, false, lines)
+            end)
+          )
+        end)
+      )
+    end)
   end
 end
 
