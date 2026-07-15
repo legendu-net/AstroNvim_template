@@ -2,7 +2,11 @@
 -- the top of a commit-message file when it is opened empty. Supports Jujutsu
 -- (`*.jjdescription`) and Git (`.git/COMMIT_EDITMSG`).
 
+-- Default prompt used by most tools.
 local PROMPT = "Write a concise conventional commit message for this diff. Output ONLY the message."
+-- jetski gets a prompt that asks for a summary line plus itemized details.
+local JETSKI_PROMPT =
+  "Write a commit message for this diff. The first line of the message should be a concise summary of the change. List itemized changes in following lines if necessary. Output ONLY the message."
 
 -- LLM tool specs, in order of preference. `build(model)` returns the argument
 -- list that reads a diff on stdin and prints a commit message; `list_models`,
@@ -21,7 +25,7 @@ local TOOLS = {
     exe = "jetski",
     model = "Gemini 3.5 Flash",
     list_models = { "jetski", "models" },
-    build = function(model) return { "jetski", "--model", model, "--print", PROMPT } end,
+    build = function(model) return { "jetski", "--model", model, "--print", JETSKI_PROMPT } end,
   },
   {
     exe = "agy",
@@ -152,20 +156,39 @@ local function make_prefill(diff_cmd, comment_prefix)
       end
       return true
     end
+    -- Notify the user and also drop the message into the buffer as VCS
+    -- comment(s), so the record survives after the notification fades. Split on
+    -- newlines because buffer lines must not contain them (stderr may be
+    -- multi-line); the comment prefix keeps it out of the final message.
+    local function report(msg, level)
+      vim.notify(msg, level)
+      -- Only record the note while the buffer is still the empty auto-fill
+      -- state, so a late failure never shifts text the user has begun typing.
+      if not vim.api.nvim_buf_is_valid(buf) or not message_empty() then return end
+      local comment = {}
+      for _, line in ipairs(vim.split(msg, "\n", { trimempty = true })) do
+        table.insert(comment, comment_prefix .. " " .. line)
+      end
+      vim.api.nvim_buf_set_lines(buf, 0, 0, false, comment)
+    end
     if not message_empty() then return end
 
     local tool = llm_tool()
     if not tool then
-      vim.notify("Commit message summary skipped: no claude/jetski/agy found", vim.log.levels.WARN)
+      report("Skipped commit message generation: no claude/jetski/agy found", vim.log.levels.WARN)
       return
     end
-    -- The LLM call takes a few seconds; let the user know it is in progress.
-    vim.notify("Generating commit message…", vim.log.levels.INFO)
     -- Look up the tool's available models first, so a configured model that has
     -- since been deprecated can be swapped for the closest one still offered.
     list_models(tool, function(available)
+      -- The user may have started typing during the async model lookup; bail out
+      -- so we neither notify nor kick off the diff/LLM work over their text.
+      if not vim.api.nvim_buf_is_valid(buf) or not message_empty() then return end
       local model, substituted = resolve_model(tool.model, available)
       local llm = tool.build(model)
+      -- The LLM call takes a few seconds; let the user know it is in progress,
+      -- naming the tool and the (possibly substituted) model actually used.
+      report("Generating commit message using " .. tool.exe .. " (" .. model .. ")…", vim.log.levels.INFO)
       -- Run the diff, then feed its output to the LLM on stdin. Each command
       -- runs directly (no shell), avoiding shell-quoting issues and the lack of
       -- `sh` on Windows.
@@ -174,14 +197,17 @@ local function make_prefill(diff_cmd, comment_prefix)
         cmd,
         { text = true },
         vim.schedule_wrap(function(diff_out)
+          -- The diff can take a moment; skip the expensive LLM call if the user
+          -- has begun typing in the meantime.
+          if not vim.api.nvim_buf_is_valid(buf) or not message_empty() then return end
           if diff_out.code ~= 0 then
-            vim.notify("Commit message summary failed: " .. (diff_out.stderr or ""), vim.log.levels.ERROR)
+            report("Failed to read diff (changes): " .. (diff_out.stderr or ""), vim.log.levels.ERROR)
             return
           end
           local diff = diff_out.stdout or ""
           -- Nothing to summarize; don't waste an LLM call on an empty diff.
           if vim.trim(diff) == "" then
-            vim.notify("Commit message summary skipped: no diff to summarize", vim.log.levels.WARN)
+            report("Skipped commit message generation: no diff to summarize", vim.log.levels.WARN)
             return
           end
           vim.system(
@@ -189,7 +215,10 @@ local function make_prefill(diff_cmd, comment_prefix)
             { text = true, stdin = diff },
             vim.schedule_wrap(function(out)
               if out.code ~= 0 then
-                vim.notify("Commit message summary failed: " .. (out.stderr or ""), vim.log.levels.ERROR)
+                report(
+                  "Failed to generate commit message using " .. tool.exe .. " (" .. model .. "): " .. (out.stderr or ""),
+                  vim.log.levels.ERROR
+                )
                 return
               end
               local msg = vim.trim(out.stdout or "")
