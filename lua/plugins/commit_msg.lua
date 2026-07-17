@@ -3,10 +3,11 @@
 -- (`*.jjdescription`) and Git (`.git/COMMIT_EDITMSG`).
 
 -- Default prompt used by most tools.
-local PROMPT = "Write a concise conventional commit message for this diff. Output ONLY the message."
+local PROMPT =
+  "Write a concise conventional commit message for this diff. Output ONLY the message, without wrapping it in Markdown code fences."
 -- jetski gets a prompt that asks for a summary line plus itemized details.
 local JETSKI_PROMPT =
-  "Write a commit message for this diff. The first line of the message should be a concise summary of the change. List itemized changes in following lines if necessary. Output ONLY the message."
+  "Write a commit message for this diff. The first line of the message should be a concise summary of the change. List itemized changes in following lines if necessary. Output ONLY the message, without wrapping it in Markdown code fences."
 
 -- LLM tool specs, in order of preference. `build(model)` returns the argument
 -- list that reads a diff on stdin and prints a commit message; `list_models`,
@@ -139,6 +140,34 @@ local function jj_diff_cmd(buf)
   return cmd
 end
 
+-- Strip a single Markdown code fence wrapping the whole message. Some LLM tools
+-- return the commit message inside a ```…``` block; when the first line is an
+-- opening fence and its matching closing fence is the last line, drop both so
+-- the fence never lands in the commit message. To stay close to CommonMark and
+-- avoid mangling real content:
+--   * The opener must be a bare fence — a run of >=3 backticks plus an optional
+--     language tag, nothing else. A line with text after the backticks (e.g.
+--     "```feat: add x") is the message itself, not a wrapper.
+--   * The close must be the *first* line, after the opener, that is a run of at
+--     least as many backticks and nothing else. If it appears before the last
+--     line, the message holds other content or additional code blocks rather
+--     than one wrapping fence, so it is returned unchanged.
+-- Also returns the message unchanged when it is not wrapped in a fence.
+local function strip_code_fence(msg)
+  local lines = vim.split(msg, "\n")
+  if #lines < 2 then return msg end
+  local fence = lines[1]:match "^%s*(```+)%s*[%w_+%-]*%s*$"
+  if not fence then return msg end
+  local closing = "^%s*" .. fence .. "`*%s*$"
+  for i = 2, #lines do
+    if lines[i]:match(closing) then
+      if i == #lines then return vim.trim(table.concat(lines, "\n", 2, #lines - 1)) end
+      return msg
+    end
+  end
+  return msg
+end
+
 -- Build a `BufReadPost`/`BufNewFile` callback that, when the message is still
 -- empty, runs the diff and pipes it to the LLM asynchronously, then prepends
 -- the result. `diff_cmd` is an argument list (e.g. `{ "git", "diff" }`) or a
@@ -221,7 +250,7 @@ local function make_prefill(diff_cmd, comment_prefix)
                 )
                 return
               end
-              local msg = vim.trim(out.stdout or "")
+              local msg = strip_code_fence(vim.trim(out.stdout or ""))
               if msg == "" then return end
               -- Re-check: the user may have started typing during the async call.
               if not vim.api.nvim_buf_is_valid(buf) or not message_empty() then return end
