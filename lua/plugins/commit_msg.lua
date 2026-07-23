@@ -4,10 +4,10 @@
 
 -- Default prompt used by most tools.
 local PROMPT =
-  "Write a concise conventional commit message for this diff. Output ONLY the message, without wrapping it in Markdown code fences."
+  "Write a concise conventional commit message for this diff. Output ONLY the message, without wrapping it in Markdown code fences or quotation marks."
 -- jetski gets a prompt that asks for a summary line plus itemized details.
 local JETSKI_PROMPT =
-  "Write a commit message for this diff. The first line of the message should be a concise summary of the change. List itemized changes in following lines if necessary. Output ONLY the message, without wrapping it in Markdown code fences."
+  "Write a commit message for this diff. The first line of the message should be a concise summary of the change. List itemized changes in following lines if necessary. Output ONLY the message, without wrapping it in Markdown code fences or quotation marks."
 
 -- LLM tool specs, in order of preference. `build(model)` returns the argument
 -- list that reads a diff on stdin and prints a commit message; `list_models`,
@@ -169,6 +169,50 @@ local function strip_code_fence(msg)
   return msg
 end
 
+-- Strip a single pair of matching quotation marks wrapping the message. Some
+-- LLM tools return the commit message as a quoted string (e.g. `"feat: add x"`
+-- or `"Add workflow"`); when the whole message, or just its first line, is
+-- wrapped in a balanced pair of quotes, drop that pair so the quotes never land
+-- in the commit subject. Straight quotes (`"`, `'`, `` ` ``) and typographic
+-- “smart” quotes are handled. Only a genuinely enclosing pair is removed — one
+-- whose delimiters do not reappear inside — so an apostrophe within the text
+-- (e.g. `fix: don't crash`) and two separate quoted spans (e.g. `"foo" and
+-- "bar"`) are left untouched.
+local function strip_surrounding_quotes(msg)
+  -- Opening/closing pairs: straight quotes (open == close) and multibyte
+  -- typographic quotes (open ~= close), written as UTF-8 byte escapes since
+  -- Neovim's LuaJIT does not accept the `\u{XXXX}` form.
+  local quote_pairs = {
+    { '"', '"' },
+    { "'", "'" },
+    { "`", "`" },
+    { "\xe2\x80\x9c", "\xe2\x80\x9d" }, -- “ ”
+    { "\xe2\x80\x98", "\xe2\x80\x99" }, -- ‘ ’
+  }
+  -- Strip a wrap around `text`, returning it unquoted or nil when not wrapped.
+  local function unwrap(text)
+    for _, pair in ipairs(quote_pairs) do
+      local open, close = pair[1], pair[2]
+      if #text >= #open + #close and text:sub(1, #open) == open and text:sub(-#close) == close then
+        local inner = text:sub(#open + 1, -#close - 1)
+        if not inner:find(open, 1, true) and not inner:find(close, 1, true) then return inner end
+      end
+    end
+    return nil
+  end
+  -- Whole-message wrap (typically a single-line, quoted subject).
+  local whole = unwrap(vim.trim(msg))
+  if whole then return vim.trim(whole) end
+  -- First-line-only wrap: the subject is quoted but the body is not.
+  local lines = vim.split(msg, "\n")
+  local subject = unwrap(lines[1])
+  if subject then
+    lines[1] = vim.trim(subject)
+    return table.concat(lines, "\n")
+  end
+  return msg
+end
+
 -- Build a `BufReadPost`/`BufNewFile` callback that, when the message is still
 -- empty, runs the diff and pipes it to the LLM asynchronously, then prepends
 -- the result. `diff_cmd` is an argument list (e.g. `{ "git", "diff" }`) or a
@@ -267,7 +311,7 @@ local function make_prefill(diff_cmd, comment_prefix)
                   try_tool(index + 1)
                   return
                 end
-                local msg = strip_code_fence(vim.trim(out.stdout or ""))
+                local msg = strip_surrounding_quotes(strip_code_fence(vim.trim(out.stdout or "")))
                 if msg == "" then
                   report("Generated empty message using " .. tool.exe .. " (" .. model .. ")", vim.log.levels.WARN)
                   try_tool(index + 1)
