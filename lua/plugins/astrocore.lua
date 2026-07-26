@@ -35,6 +35,8 @@ return {
       },
       pattern = {
         [".*/etc/foo/.*"] = "fooscript",
+        -- the `blog` project is a MyST project, so scope MyST snippets to it
+        [".*/archives/blog/docs/.*%.md"] = "markdown.myst",
       },
     },
     -- vim options can be configured here

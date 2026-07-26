@@ -1,0 +1,11 @@
+{
+  "name": "user-snippets",
+  "contributes": {
+    "snippets": [
+      {
+        "language": ["myst"],
+        "path": "./myst.json"
+      }
+    ]
+  }
+}

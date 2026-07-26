@@ -6,7 +6,10 @@
       "${0:tip here}",
       "```"
     ],
-    "description": "Add a list-table in MyST markdown."
+    "description": "Add a tip admonition in MyST markdown.",
+    "luasnip": {
+      "priority": 1001
+    }
   },
   "Note - Myst": {
     "prefix": "note",
@@ -15,7 +18,10 @@
       "${0:note here}",
       "```"
     ],
-    "description": "Add a list-table in MyST markdown."
+    "description": "Add a note admonition in MyST markdown.",
+    "luasnip": {
+      "priority": 1001
+    }
   },
   "List Table - Myst": {
     "prefix": "lt",
@@ -33,13 +39,19 @@
       "$0",
       "```"
     ],
-    "description": "Add a list-table in MyST markdown."
+    "description": "Add a list-table in MyST markdown.",
+    "luasnip": {
+      "priority": 1001
+    }
   },
   "Label - Myst": {
     "prefix": "label",
     "body": [
       "(${0:my-label})="
     ],
-    "description": "Add a label in MyST markdown for referencing."
+    "description": "Add a label in MyST markdown for referencing.",
+    "luasnip": {
+      "priority": 1001
+    }
   }
 }
