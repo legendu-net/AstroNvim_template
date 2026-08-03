@@ -1,0 +1,52 @@
+name: Check Age Of lazy-lock.json
+# The pinned plugin versions in lazy-lock.json are refreshed by hand: plugins are
+# updated in the Neovim configuration in daily use, exercised there until they are
+# trusted, and only then copied here by sync-lazy-lock.sh and committed. That is
+# easy to forget, so this workflow fails once the committed lock file has not been
+# refreshed for a while, which notifies the repository owner by email.
+#
+# Only the committed lock file is visible here, so this measures how long ago the
+# plugin set was last blessed, not whether a newer one is already being exercised
+# in daily use.
+on:
+  schedule:
+    - cron: '0 4 * * 1'
+      timezone: 'America/Los_Angeles'
+  workflow_dispatch:
+    inputs:
+      max-age-days:
+        description: 'Fail when lazy-lock.json is older than this many days.'
+        required: false
+        default: '30'
+jobs:
+  check_lazy_lock_age:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # The whole history is needed to find the commit which last touched
+          # lazy-lock.json, which is generally not the most recent commit.
+          fetch-depth: 0
+      - name: Check Age Of lazy-lock.json
+        shell: bash
+        env:
+          MAX_AGE_DAYS: ${{ inputs.max-age-days || '30' }}
+        run: |
+          set -euo pipefail
+          timestamp=$(git log -1 --format=%ct -- lazy-lock.json)
+          if [[ -z $timestamp ]]; then
+              echo "::error file=lazy-lock.json::lazy-lock.json has never been committed."
+              exit 1
+          fi
+          days=$((($(date +%s) - timestamp) / 86400))
+          echo "lazy-lock.json was last refreshed $days day(s) ago." >> "$GITHUB_STEP_SUMMARY"
+          if ((days <= MAX_AGE_DAYS)); then
+              echo "lazy-lock.json was refreshed $days day(s) ago, which is within $MAX_AGE_DAYS day(s)."
+              exit 0
+          fi
+          echo "Update the plugins in the Neovim configuration in daily use, exercise them," \
+              "and then run ./sync-lazy-lock.sh to copy the lock file here." >> "$GITHUB_STEP_SUMMARY"
+          echo "::error file=lazy-lock.json::lazy-lock.json was last refreshed $days day(s) ago," \
+              "which exceeds the limit of $MAX_AGE_DAYS day(s)."
+          exit 1
