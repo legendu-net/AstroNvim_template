@@ -48,11 +48,44 @@ return {
         signcolumn = "yes", -- sets vim.opt.signcolumn to yes
         wrap = false, -- sets vim.opt.wrap
         autowriteall = true, -- Auto save when switching buffers, losing focus, etc.
+        -- Plugins and `:!` emit POSIX syntax that fish rejects, so fall back to
+        -- bash only when `$SHELL` is fish; other shells are left alone. bash over
+        -- `sh` because it is a POSIX superset and stays bash on distros where
+        -- `/bin/sh` is dash. Read here at spec-parse time, `vim.o.shell` is still
+        -- the `$SHELL`-derived default.
+        shell = vim.fn.fnamemodify(vim.o.shell, ":t") == "fish" and (vim.fn.executable "bash" == 1 and "bash" or "sh")
+          or nil,
       },
       g = { -- vim.g.<key>
         -- configure global vim variables (vim.g)
         -- NOTE: `mapleader` and `maplocalleader` must be set in the AstroNvim opts or before `lazy.setup`
         -- This can be found in the `lua/lazy_setup.lua` file
+      },
+    },
+    -- user commands, see `:h nvim_create_user_command`
+    commands = {
+      -- `:!` and plugin shell-outs stay on `vim.o.shell`; `:F {cmd}` runs a single
+      -- command through fish, for fish syntax and `~/.config/fish/functions`.
+      -- NOTE: `fish -c` is neither login nor interactive, so `config.fish` (which
+      -- is wrapped in `status is-interactive`) is skipped and abbreviations do not
+      -- expand. `%`/`#`/`!` still expand, since the real `:!` does the expanding.
+      F = {
+        function(opts)
+          if vim.fn.executable "fish" ~= 1 then
+            return vim.notify("`:F` requires fish, which is not executable; use `:!`", vim.log.levels.ERROR)
+          end
+          -- `shellcmdflag` is derived from `$SHELL` at startup and never re-derived,
+          -- so pin it too rather than inheriting a possibly non-POSIX flag
+          local shell, cmdflag = vim.o.shell, vim.o.shellcmdflag
+          vim.o.shell, vim.o.shellcmdflag = "fish", "-c"
+          -- always restore, or a failed command would strand fish globally
+          local ok, err = pcall(vim.cmd, "!" .. opts.args)
+          vim.o.shell, vim.o.shellcmdflag = shell, cmdflag
+          if not ok then vim.notify(err, vim.log.levels.ERROR) end
+        end,
+        desc = "Run a shell command through fish",
+        nargs = "+",
+        complete = "shellcmd",
       },
     },
     -- Mappings can be configured through AstroCore as well.
