@@ -1,6 +1,10 @@
 std = "neovim"
 
 [rules]
+# Neovim runs LuaJIT, which accepts `\xXX` byte escapes, but `neovim.yml` sets
+# `base: lua51` and Lua 5.1 proper does not. selene has no `luajit` base to
+# switch to, so the lint is disabled rather than have it flag valid escapes.
+bad_string_escape = "allow"
 global_usage = "allow"
 if_same_then_else = "allow"
 incorrect_standard_library_use = "allow"

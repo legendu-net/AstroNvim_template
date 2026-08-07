@@ -1,0 +1,66 @@
+name: Lint Lua
+# `.stylua.toml`, `selene.toml` and `neovim.yml` have described the formatting
+# and lint rules for this configuration all along, but nothing ran them, so
+# drift went unnoticed. This workflow enforces them.
+#
+# Both tools are installed from their official GitHub releases at pinned
+# versions rather than tracking the latest: a floating version lets an upstream
+# formatting or lint change turn a previously green branch red without anything
+# here having changed. Bump the versions below deliberately, and when stylua is
+# bumped run `stylua .` locally in the same commit so the tree matches whatever
+# the new version considers formatted.
+on:
+  push:
+    paths:
+      - '**.lua'
+      - '.stylua.toml'
+      - 'selene.toml'
+      - 'neovim.yml'
+      - '.github/workflows/lint_lua.yaml'
+  workflow_dispatch:
+env:
+  # Note the asymmetry in the release tags these build into: stylua tags its
+  # releases `v2.5.2`, selene tags its own `0.31.0`, without the leading `v`.
+  STYLUA_VERSION: '2.5.2'
+  SELENE_VERSION: '0.31.0'
+jobs:
+  lint_lua:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Install stylua and selene
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp=$(mktemp -d)
+          cd "$tmp"
+          curl -sSLf -o stylua.zip \
+              "https://github.com/JohnnyMorganz/StyLua/releases/download/v${STYLUA_VERSION}/stylua-linux-x86_64.zip"
+          curl -sSLf -o selene.zip \
+              "https://github.com/Kampfkarren/selene/releases/download/${SELENE_VERSION}/selene-${SELENE_VERSION}-linux.zip"
+          unzip -q stylua.zip
+          unzip -q selene.zip
+          # `install -m 755` rather than `cp`/`mv`: selene's archive stores its
+          # binary as mode 644, so a plain copy lands something non-executable.
+          sudo install -m 755 stylua selene /usr/local/bin/
+          stylua --version
+          selene --version
+      - name: Check formatting with stylua
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! stylua --check .; then
+              echo "Run \`stylua .\` to apply the formatting shown above." >> "$GITHUB_STEP_SUMMARY"
+              echo "::error::Some Lua files are not formatted according to .stylua.toml."
+              exit 1
+          fi
+      # selene exits nonzero for warnings as well as errors, which is wanted
+      # here: the rules left enabled in `selene.toml` are all worth acting on.
+      - name: Lint with selene
+        shell: bash
+        run: |
+          set -euo pipefail
+          selene .
