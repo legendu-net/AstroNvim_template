@@ -14,7 +14,7 @@ on:
       timezone: 'America/Los_Angeles'
   workflow_dispatch:
     inputs:
-      max-age-days:
+      max_age_days:
         description: 'Fail when lazy-lock.json is older than this many days.'
         required: false
         default: '30'
@@ -31,7 +31,7 @@ jobs:
       - name: Check Age Of lazy-lock.json
         shell: bash
         env:
-          MAX_AGE_DAYS: ${{ inputs.max-age-days || '30' }}
+          MAX_AGE_DAYS: ${{ inputs.max_age_days || '30' }}
         run: |
           set -euo pipefail
           timestamp=$(git log -1 --format=%ct -- lazy-lock.json)
