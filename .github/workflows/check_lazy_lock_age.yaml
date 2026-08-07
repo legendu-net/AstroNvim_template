@@ -1,7 +1,7 @@
 name: Check Age Of lazy-lock.json
 # The pinned plugin versions in lazy-lock.json are refreshed by hand: plugins are
 # updated in the Neovim configuration in daily use, exercised there until they are
-# trusted, and only then copied here by sync-lazy-lock.sh and committed. That is
+# trusted, and only then copied here by sync_lazy_lock.fish and committed. That is
 # easy to forget, so this workflow fails once the committed lock file has not been
 # refreshed for a while, which notifies the repository owner by email.
 #
@@ -21,6 +21,8 @@ on:
 jobs:
   check_lazy_lock_age:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -46,7 +48,7 @@ jobs:
               exit 0
           fi
           echo "Update the plugins in the Neovim configuration in daily use, exercise them," \
-              "and then run ./sync-lazy-lock.sh to copy the lock file here." >> "$GITHUB_STEP_SUMMARY"
+              "and then run ./sync_lazy_lock.fish to copy the lock file here." >> "$GITHUB_STEP_SUMMARY"
           echo "::error file=lazy-lock.json::lazy-lock.json was last refreshed $days day(s) ago," \
               "which exceeds the limit of $MAX_AGE_DAYS day(s)."
           exit 1
