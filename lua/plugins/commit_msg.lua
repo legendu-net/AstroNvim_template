@@ -24,7 +24,7 @@ local TOOLS = {
   },
   {
     exe = "jetski",
-    model = "Gemini 3.5 Flash",
+    model = "gemini-3.6-flash",
     list_models = { "jetski", "models" },
     build = function(model) return { "jetski", "--model", model, "--print", JETSKI_PROMPT } end,
   },
@@ -101,8 +101,8 @@ local function list_models(tool, cb)
       if out.code ~= 0 then return cb(nil) end
       local models = {}
       for line in (out.stdout or ""):gmatch "[^\n]+" do
-        local m = vim.trim(line)
-        if m ~= "" then table.insert(models, m) end
+        local m = line:match "^%s*(%S+)"
+        if m and m ~= "" then table.insert(models, m) end
       end
       cb(#models > 0 and models or nil)
     end)
