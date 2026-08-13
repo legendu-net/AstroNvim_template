@@ -9,19 +9,37 @@ local PROMPT =
 local JETSKI_PROMPT =
   "Write a commit message for this diff. The first line of the message should be a concise summary of the change. List itemized changes in following lines if necessary. Output ONLY the message, without wrapping it in Markdown code fences or quotation marks."
 
+-- OmniRoute is an OpenAI-compatible LLM gateway; `auto/fast` is one of its
+-- routing strategies rather than a concrete model, so the gateway picks the
+-- model behind it. The endpoint and key default to a local instance and can be
+-- overridden from the environment, so the same configuration also works on a
+-- machine that reaches OmniRoute elsewhere.
+local OMNIROUTE_BASE_URL = vim.env.OMNIROUTE_BASE_URL or "http://localhost:20128/v1"
+local OMNIROUTE_API_KEY = vim.env.OMNIROUTE_API_KEY or "YOUR_OMNIROUTE_API_KEY"
+local OMNIROUTE_MODEL = "auto/fast"
+
+-- Cap a value at a length that stays readable once `report` writes it into the
+-- buffer as comment lines; an API error body can be arbitrarily long. Cuts on
+-- character boundaries (`strcharpart`, not `string.sub`) so a multi-byte UTF-8
+-- character in the body is never split in half.
+local function truncate(text, limit)
+  limit = limit or 300
+  local head = vim.fn.strcharpart(text, 0, limit)
+  if head == text then return text end
+  return head .. "…"
+end
+
 -- LLM tool specs, in order of preference. `build(model)` returns the argument
--- list that reads a diff on stdin and prints a commit message; `list_models`,
--- when set, is a command that prints the tool's available models (one per line)
--- so a configured-but-deprecated model can be detected and replaced.
+-- list that prints a commit message; `stdin(diff, model)`, when set, maps the
+-- diff to what that command reads on stdin (absent: the diff itself); both
+-- receive the resolved model (see `resolve_model`), not `tool.model`, so a
+-- substitution reaches every part of the request. `parse(stdout)`, when set,
+-- extracts the message from its output, returning nil plus a reason on failure
+-- (absent: the output is the message); `name`, when set, labels the tool in
+-- messages instead of `exe`; `list_models`, when set, is a command that prints
+-- the tool's available models (one per line) so a configured-but-deprecated
+-- model can be detected and replaced.
 local TOOLS = {
-  {
-    exe = "claude",
-    model = "haiku",
-    -- Aliases (haiku/sonnet/opus/fable) always resolve to the latest model and
-    -- are not deprecated, so there is nothing to validate against.
-    list_models = nil,
-    build = function(model) return { "claude", "--model", model, "-p", PROMPT } end,
-  },
   {
     exe = "jetski",
     model = "gemini-3.6-flash",
@@ -29,10 +47,55 @@ local TOOLS = {
     build = function(model) return { "jetski", "--model", model, "--print", JETSKI_PROMPT } end,
   },
   {
-    exe = "agy",
-    model = "Gemini 3.5 Flash (Low)",
-    list_models = { "agy", "models" },
-    build = function(model) return { "agy", "--model", model, "--print", PROMPT } end,
+    -- OmniRoute speaks the OpenAI chat-completions API over HTTP. curl is
+    -- spawned for it rather than using `vim.net.request`, which is GET-only, or
+    -- plenary.curl, which is another wrapper around the same binary.
+    exe = "curl",
+    name = "OmniRoute",
+    model = OMNIROUTE_MODEL,
+    -- A routing strategy is not a model that can be deprecated, so there is
+    -- nothing to validate against.
+    list_models = nil,
+    build = function()
+      return {
+        "curl",
+        "-sS",
+        "--max-time",
+        "120",
+        "-X",
+        "POST",
+        OMNIROUTE_BASE_URL .. "/chat/completions",
+        "-H",
+        "Content-Type: application/json",
+        "-H",
+        "Authorization: Bearer " .. OMNIROUTE_API_KEY,
+        -- Read the request body from stdin, so a large diff never runs into an
+        -- argument length limit.
+        "--data-binary",
+        "@-",
+      }
+    end,
+    stdin = function(diff, model)
+      return vim.json.encode {
+        model = model,
+        -- `stream` has to be sent explicitly: the gateway otherwise replies
+        -- with a server-sent event stream, which is not a JSON document.
+        stream = false,
+        messages = { { role = "user", content = PROMPT .. "\n\n" .. diff } },
+      }
+    end,
+    parse = function(stdout)
+      local ok, body = pcall(vim.json.decode, stdout)
+      if not ok or type(body) ~= "table" then return nil, "response is not JSON: " .. truncate(stdout) end
+      -- A failed request answers with an HTTP error status, which curl does not
+      -- turn into a nonzero exit, so the body is the only signal of failure.
+      if type(body.error) == "table" then return nil, body.error.message or truncate(stdout) end
+      local choice = body.choices and body.choices[1]
+      local content = choice and choice.message and choice.message.content
+      -- A JSON null decodes to `vim.NIL`, which is truthy, hence the type check.
+      if type(content) ~= "string" then return nil, "response has no message content: " .. truncate(stdout) end
+      return content
+    end,
   },
 }
 
@@ -251,7 +314,7 @@ local function make_prefill(diff_cmd, comment_prefix)
 
     local tools = llm_tools()
     if #tools == 0 then
-      report("Skipped commit message generation: no claude/jetski/agy found", vim.log.levels.WARN)
+      report("Skipped commit message generation: no jetski/curl found", vim.log.levels.WARN)
       return
     end
 
@@ -298,29 +361,39 @@ local function make_prefill(diff_cmd, comment_prefix)
             if not vim.api.nvim_buf_is_valid(buf) or not message_empty() then return end
             local model, substituted = resolve_model(tool.model, available)
             local llm = tool.build(model)
+            local label = tool.name or tool.exe
 
-            report("Generating commit message using " .. tool.exe .. " (" .. model .. ")…", vim.log.levels.INFO)
+            report("Generating commit message using " .. label .. " (" .. model .. ")…", vim.log.levels.INFO)
 
             vim.system(
               llm,
-              { text = true, stdin = diff },
+              { text = true, stdin = tool.stdin and tool.stdin(diff, model) or diff },
               vim.schedule_wrap(function(out)
                 if out.code ~= 0 then
                   report(
-                    "Failed to generate commit message using "
-                      .. tool.exe
-                      .. " ("
-                      .. model
-                      .. "): "
-                      .. (out.stderr or ""),
+                    "Failed to generate commit message using " .. label .. " (" .. model .. "): " .. (out.stderr or ""),
                     vim.log.levels.ERROR
                   )
                   try_tool(index + 1)
                   return
                 end
-                local msg = strip_surrounding_quotes(strip_code_fence(vim.trim(out.stdout or "")))
+                -- Tools that answer with more than the message itself (an API
+                -- response) extract it here, and report why when they cannot.
+                local msg, err = vim.trim(out.stdout or ""), nil
+                if tool.parse then
+                  msg, err = tool.parse(msg)
+                end
+                if not msg then
+                  report(
+                    "Failed to generate commit message using " .. label .. " (" .. model .. "): " .. (err or ""),
+                    vim.log.levels.ERROR
+                  )
+                  try_tool(index + 1)
+                  return
+                end
+                msg = strip_surrounding_quotes(strip_code_fence(vim.trim(msg)))
                 if msg == "" then
-                  report("Generated empty message using " .. tool.exe .. " (" .. model .. ")", vim.log.levels.WARN)
+                  report("Generated empty message using " .. label .. " (" .. model .. ")", vim.log.levels.WARN)
                   try_tool(index + 1)
                   return
                 end
@@ -343,10 +416,7 @@ local function make_prefill(diff_cmd, comment_prefix)
                 -- Record which tool and model produced this draft so the author
                 -- knows its provenance and how much to scrutinize it. Grouped with
                 -- the VCS comments, so it is stripped from the final message.
-                table.insert(
-                  lines,
-                  comment_prefix .. " Commit message generated by " .. tool.exe .. " (" .. model .. ")"
-                )
+                table.insert(lines, comment_prefix .. " Commit message generated by " .. label .. " (" .. model .. ")")
                 vim.api.nvim_buf_set_lines(buf, 0, 0, false, lines)
               end)
             )
