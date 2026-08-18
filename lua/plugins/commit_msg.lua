@@ -9,14 +9,15 @@ local PROMPT =
 local JETSKI_PROMPT =
   "Write a commit message for this diff. The first line of the message should be a concise summary of the change. List itemized changes in following lines if necessary. Output ONLY the message, without wrapping it in Markdown code fences or quotation marks."
 
--- OmniRoute is an OpenAI-compatible LLM gateway; `auto/fast` is one of its
--- routing strategies rather than a concrete model, so the gateway picks the
--- model behind it. The endpoint and key default to a local instance and can be
--- overridden from the environment, so the same configuration also works on a
--- machine that reaches OmniRoute elsewhere.
+-- OmniRoute is an OpenAI-compatible LLM gateway; `<namespace>/<name>` values
+-- like `auto/fast` (a built-in routing strategy) or `user/vcs-commit-message`
+-- (a user-defined named route) are aliases rather than concrete models, so the
+-- gateway picks the model behind them. The endpoint and key default to a local
+-- instance and can be overridden from the environment, so the same
+-- configuration also works on a machine that reaches OmniRoute elsewhere.
 local OMNIROUTE_BASE_URL = vim.env.OMNIROUTE_BASE_URL or "http://localhost:20128/v1"
 local OMNIROUTE_API_KEY = vim.env.OMNIROUTE_API_KEY or "YOUR_OMNIROUTE_API_KEY"
-local OMNIROUTE_MODEL = "auto/fast"
+local OMNIROUTE_MODEL = "user/vcs-commit-message"
 
 -- Cap a value at a length that stays readable once `report` writes it into the
 -- buffer as comment lines; an API error body can be arbitrarily long. Cuts on
@@ -53,8 +54,8 @@ local TOOLS = {
     exe = "curl",
     name = "OmniRoute",
     model = OMNIROUTE_MODEL,
-    -- A routing strategy is not a model that can be deprecated, so there is
-    -- nothing to validate against.
+    -- An alias (routing strategy or user-defined route) is not a model that
+    -- can be deprecated, so there is nothing to validate against.
     list_models = nil,
     build = function()
       return {
