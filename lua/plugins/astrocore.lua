@@ -46,7 +46,7 @@ return {
         number = true, -- sets vim.opt.number
         spell = false, -- sets vim.opt.spell
         signcolumn = "yes", -- sets vim.opt.signcolumn to yes
-        wrap = false, -- sets vim.opt.wrap
+        wrap = true, -- sets vim.opt.wrap
         autowriteall = true, -- Auto save when switching buffers, losing focus, etc.
         -- Plugins and `:!` emit POSIX syntax that fish rejects, so fall back to
         -- bash only when `$SHELL` is fish; other shells are left alone. bash over
