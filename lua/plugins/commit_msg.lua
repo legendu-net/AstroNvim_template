@@ -3,9 +3,10 @@
 -- file is opened empty, run `ccm --dry-run` and prefill the buffer with the
 -- message it prints. All diffing, tool/API selection, and LLM calling live in
 -- `ccm` itself; this script only detects the empty-buffer case, invokes `ccm`
--- (scoping it to the files a `.jjdescription` buffer's `JJ:` comments list, so
--- e.g. `jj split <file>` gets a message generated from just that file's diff),
--- and turns its exit code into a notification the user can act on. Supports
+-- (scoping it to the revision and files a `.jjdescription` buffer's `JJ:`
+-- comments name, so e.g. `jj describe @-` gets a message generated from `@-`'s
+-- diff and `jj split <file>` one from just that file's diff), and turns its
+-- exit code into a notification the user can act on. Supports
 -- Jujutsu (`*.jjdescription`) and Git (`.git/COMMIT_EDITMSG`).
 
 -- Human-readable reasons for `ccm --dry-run`'s documented exit codes (see
@@ -95,15 +96,10 @@ end
 -- against `<new>`, never `<old>`, for a rename/copy line (prd.md, "Diff scope
 -- resolution").
 --
--- Known limitation, left unaddressed: `ccm` has no way to scope its diff to a
--- revision other than the current working-copy change (`@`) — it always runs
--- plain `jj diff`, never `jj diff -r <rev>` (unlike the JJ:-comment-scoped
--- diff the previous version of this script built by hand). So this file list
--- is only meaningful when the description buffer is actually for `@`, which
--- covers the common `jj split`/`jj commit -i`/`jj describe` cases this
--- targets; a buffer opened for some other revision (e.g. `jj describe -r
--- <rev>`) would have `--include` restrict `@`'s diff to paths that belong to
--- a different change entirely.
+-- The list is matched against the revision `jj_description_revision` names
+-- (passed to `ccm` as `-r`), not necessarily the working copy: for `jj split`,
+-- that revision still holds every change when the editor opens, and these
+-- lines are the only record of which subset was selected.
 local function jj_description_files(buf)
   local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
   local files = {}
@@ -118,6 +114,32 @@ local function jj_description_files(buf)
   return files
 end
 
+-- Extracts the revision a `.jjdescription` buffer is for, from the `JJ: Change
+-- ID: <id>` line jj writes into it — jj passes the editor nothing but the file
+-- path, so this line is the only place the revision is recorded. Returns:
+-- - the change ID, for `ccm -r`;
+-- - nil when there's no such line (a jj version or template that doesn't
+--   write it), so `ccm` falls back to its default of the working copy;
+-- - false for a multi-revision `jj describe <rev>...` buffer (one `JJ: describe
+--   <commit-id> -------` separator per revision, each with its own Change ID),
+--   which one generated message can't fill — the caller skips generation.
+-- A divergent change's ID is ambiguous to jj, and the buffer carries no commit
+-- ID to disambiguate it with, so `ccm -r` then fails (exit 7) with jj's own
+-- hint in the reported stderr rather than diffing the wrong revision.
+local function jj_description_revision(buf)
+  local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+  local revision
+  for _, line in ipairs(lines) do
+    if line:match "^JJ: describe %S+ %-+$" then return false end
+    local id = line:match "^JJ: Change ID: (%S+)%s*$"
+    if id then
+      if revision then return false end
+      revision = id
+    end
+  end
+  return revision
+end
+
 -- Build a `BufReadPost`/`BufNewFile` callback that, when the message is still
 -- empty, runs `ccm --dry-run` asynchronously and prepends its output.
 -- `comment_prefixes` is the line prefix(es) the VCS uses for comments (`{
@@ -127,9 +149,10 @@ end
 -- `extra_args`, if given, is a list of extra arguments appended to the `ccm`
 -- invocation (e.g. `{ "--git" }` to force git handling for a `COMMIT_EDITMSG`
 -- buffer, matching what's actually being committed even inside a colocated
--- git+jj repository), or a function `(buf) -> list|nil` to compute one from
--- the buffer's contents (e.g. `--include <files>` from a `.jjdescription`
--- buffer's `JJ:` comments).
+-- git+jj repository), or a function `(buf) -> list|nil|false` to compute one
+-- from the buffer's contents (e.g. `-r <change-id> --include <files>` from a
+-- `.jjdescription` buffer's `JJ:` comments); `false` skips generation for
+-- this buffer entirely, leaving it untouched.
 local function make_prefill(comment_prefixes, extra_args)
   return function(args)
     local buf = args.buf
@@ -166,12 +189,14 @@ local function make_prefill(comment_prefixes, extra_args)
     end
     if not message_empty() then return end
 
+    local resolved_extra_args = extra_args
+    if type(extra_args) == "function" then resolved_extra_args = extra_args(buf) end
+    if resolved_extra_args == false then return end
+
     if vim.fn.executable "ccm" == 0 then
       report("Skipped commit message generation: ccm not found on $PATH", vim.log.levels.WARN)
       return
     end
-
-    local resolved_extra_args = type(extra_args) == "function" and extra_args(buf) or extra_args
 
     local cmd = { "ccm", "--dry-run" }
     if resolved_extra_args then vim.list_extend(cmd, resolved_extra_args) end
@@ -296,15 +321,22 @@ return {
           event = { "BufReadPost", "BufNewFile" },
           pattern = "*.jjdescription",
           desc = "Prefill jj description with an AI-generated commit message via ccm",
-          -- Scope ccm's diff to the JJ:-listed files, if any (e.g. a `jj
+          -- Scope ccm's diff to the revision the buffer is for (e.g. `@-` for
+          -- `jj describe @-`) and to the JJ:-listed files, if any (e.g. a `jj
           -- split <file>`/`jj commit -i` invocation) — see
-          -- jj_description_files. Falls back to ccm's own default (the whole
-          -- working copy) when the buffer lists none.
+          -- jj_description_revision and jj_description_files. Each falls back
+          -- to ccm's own default (the working copy; all of its files) when the
+          -- buffer doesn't name one; a multi-revision buffer is skipped.
           callback = make_prefill({ "JJ:", "JJCOPY:" }, function(buf)
+            local revision = jj_description_revision(buf)
+            if revision == false then return false end
+            local args = {}
+            if revision then vim.list_extend(args, { "-r", revision }) end
             local files = jj_description_files(buf)
-            if #files == 0 then return nil end
-            local args = { "--include" }
-            vim.list_extend(args, files)
+            if #files > 0 then
+              table.insert(args, "--include")
+              vim.list_extend(args, files)
+            end
             return args
           end),
         },
